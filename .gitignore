@@ -1,0 +1,5 @@
+# Build outputs and files the tools create when they run
+*.exe
+*.pdb
+stage3-app/DualConnectTray.ini
+actions.csv
