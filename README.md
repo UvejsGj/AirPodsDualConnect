@@ -54,3 +54,7 @@ The full reasoning, evidence and risks behind the stages are in [docs/feasibilit
 ## What to do first
 
 Start with Stage 1: record the baseline and run the trials in the [measurement plan](docs/stage1-measurement-plan.md), logging results in the live doc's Trial log tab. A single ordered checklist of every hands-on step, Stage 1 trials first, is being put together and will be added here when it is final.
+
+## Contributing, conduct and license
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules, how to build and test, and what to include in a report. The project follows the [Code of Conduct](CODE_OF_CONDUCT.md), security problems go through the [security policy](SECURITY.md), and the code is under the [MIT License](LICENSE).

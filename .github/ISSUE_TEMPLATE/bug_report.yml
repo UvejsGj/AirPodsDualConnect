@@ -1,0 +1,75 @@
+name: Bug report
+description: Something in DualConnect, the tray app or the docs doesn't work as described.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Pairing safety.** If you ever pair the AirPods again, double-tap the front of the open case once and stop as soon as the light flashes white. A second double-tap while it flashes starts Apple's reset. Nothing in this project needs a reset.
+
+        Replace your AirPods' Bluetooth address with `XX:XX:XX:XX:XX:XX` in anything you paste.
+  - type: dropdown
+    id: part
+    attributes:
+      label: Which part?
+      options:
+        - DualConnect (Stage 1 tool)
+        - DualConnect Tray (Stage 3 app)
+        - Docs or plan
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Laptop playing music through the AirPods
+        2. Pressed Win+Alt+A
+        3. ...
+  - type: dropdown
+    id: sound
+    attributes:
+      label: Where was the sound afterwards?
+      options:
+        - Laptop
+        - iPhone
+        - Nowhere
+        - Not sure
+  - type: textarea
+    id: output
+    attributes:
+      label: Tool output or log lines
+      description: For example `DualConnect.exe status --json`, or the last lines of `%LOCALAPPDATA%\DualConnectTray\events.csv`.
+      render: text
+  - type: input
+    id: windows
+    attributes:
+      label: Windows edition and build
+      description: Run `winver`.
+      placeholder: Windows 11 Home 24H2, build 26100.xxxx
+    validations:
+      required: true
+  - type: input
+    id: ios
+    attributes:
+      label: iOS version
+  - type: input
+    id: airpods
+    attributes:
+      label: AirPods model and firmware
+      placeholder: AirPods Pro 3, firmware 9A348
+    validations:
+      required: true
+  - type: input
+    id: adapter
+    attributes:
+      label: Bluetooth adapter and driver version
+      description: Device Manager, Bluetooth.
