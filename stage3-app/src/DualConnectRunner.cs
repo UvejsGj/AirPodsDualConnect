@@ -14,13 +14,20 @@ namespace DualConnectTray
     {
         public readonly string ExePath;
         public readonly string DeviceName;
+        public readonly string ContainerId;   // empty: DualConnect matches by DeviceName alone
         public readonly int TimeoutSeconds;
         public int WaitBudgetOverrideMs;   // tests only; 0 = use WaitBudgetMs
 
         public DualConnectRunner(string exePath, string deviceName, int timeoutSeconds)
+            : this(exePath, deviceName, "", timeoutSeconds)
+        {
+        }
+
+        public DualConnectRunner(string exePath, string deviceName, string containerId, int timeoutSeconds)
         {
             ExePath = exePath;
             DeviceName = deviceName;
+            ContainerId = containerId ?? "";
             TimeoutSeconds = timeoutSeconds;
         }
 
@@ -48,6 +55,11 @@ namespace DualConnectTray
         public string BuildArguments(string verb)
         {
             var args = new List<string> { verb, "--json", "--name", DeviceName };
+            if (ContainerId.Length > 0)
+            {
+                args.Add("--container");
+                args.Add(ContainerId);
+            }
             if (verb != "status")
             {
                 args.Add("--timeout");
@@ -56,12 +68,15 @@ namespace DualConnectTray
             return ArgQuote.Join(args);
         }
 
-        // How long the tray waits before giving up. "take" may disconnect and then connect,
-        // and each half can use the full --timeout, so allow for both plus process start.
+        // How long the tray waits before it ends the process. DualConnect's own watchdog answers
+        // first (INTERFACE.md): status within 15 s; a switch within about 5.5 s of waiting for the
+        // lock plus --timeout + 8 s, and "take" within twice --timeout + 8 s, because it may
+        // disconnect and then connect. The extra 10 s or more here is for starting the process.
         public int WaitBudgetMs(string verb)
         {
-            if (verb == "status") return 20000;
-            return (TimeoutSeconds * 2 + 15) * 1000;
+            if (verb == "status") return 25000;
+            int steps = verb == "take" ? 2 : 1;
+            return (TimeoutSeconds * steps + 25) * 1000;
         }
 
         // Blocking: call it from a background thread, never the UI thread.

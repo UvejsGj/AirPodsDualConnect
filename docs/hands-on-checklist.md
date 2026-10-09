@@ -1,4 +1,4 @@
-> **Snapshot.** Copy of the Claude Doc [Your hands-on checklist](https://claude.ai/code/artifact/6098c67b-f0e9-41c0-86b5-50b97285a0a5) (revision 12), exported on 9 Oct 2026. The live doc is the one to tick off; this copy does not update by itself.
+> **Snapshot.** Copy of the Claude Doc [Your hands-on checklist](https://claude.ai/code/artifact/6098c67b-f0e9-41c0-86b5-50b97285a0a5) (revision 14), exported on 9 Oct 2026. The live doc is the one to tick off; this copy does not update by itself.
 
 # Your hands-on checklist: AirPods Pro 3 on iPhone and Windows
 
@@ -76,9 +76,9 @@ It sits here because the tray only wraps Part 4's tool, needs nothing from Stage
 
 - [ ] Copy `stage3-app` beside `stage1-tools`, in the same parent folder.
 - [ ] Double-click `stage3-app\build.cmd`. Expect "Built ...\\DualConnectTray.exe". If it says "Build failed", paste the lines above it into the thread.
-- [ ] Start `DualConnectTray.exe`. A new icon appears in the notification area, possibly behind the ^ arrow. If a notice says the hotkey is taken: Edit settings, change `ToggleHotkey`, save, then Reload settings.
+- [ ] Start `DualConnectTray.exe`. A new icon appears in the notification area, possibly behind the ^ arrow. If a notice says the hotkey is taken: Edit settings, change `ToggleHotkey`, save, then Reload settings. If it says more than one device matches, run Status.cmd in stage1-tools, copy your pair's containerId into the ContainerId setting the same way, and reload.
 - [ ] With laptop sound in the AirPods, hover the icon: "AirPods on this laptop" with a green tick. Choose Give AirPods back: grey ring, "AirPods not on this laptop".
-- [ ] Press Win+Alt+A five times each way. Note whether the sound moved and whether the icon matches.
+- [ ] Press Win+Alt+A five times each way. Note whether the sound moved and whether the icon matches. Once, press Win+Alt+A, wait about a second and press it again while the icon is still blue: the tray should stop that switch and go back. Skip this if the switch finishes too quickly to try.
 - [ ] With the laptop playing, start music on the iPhone and note whether the tray says "AirPods left the laptop". No notice means Windows kept its link: set `TakeHotkey=Win+Alt+Shift+A` (or another free combination), reload, and use it to bring the sound back.
 - [ ] Optional: tick Start with Windows, sign out and back in, and check the icon returns. Unticking deletes one shortcut from your Startup folder; there is no registry change.
 - [ ] After a week, open Switch summary (last 7 days) and paste the text into the thread.

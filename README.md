@@ -16,7 +16,7 @@ The project follows a staged plan with gates. Stage 1 measures what the AirPods 
 | --- | --- | --- | --- |
 | 1. Measure | Timed trials of switching by hand between iPhone and laptop, two iPhone settings, a microphone check and one ordinary day, then a pass/fail gate. Also a one-key Windows connect/disconnect tool (DualConnect) and a read-only trial logger. | Plan ready, trials not run yet. DualConnect and the logger are final; compiled and simulated in a container, never run on Windows. | [docs/stage1-measurement-plan.md](docs/stage1-measurement-plan.md), [docs/stage1-trial-log.md](docs/stage1-trial-log.md), [stage1-tools/](stage1-tools/) |
 | 2. Proof of concept | Desk research on how to test a second live link and a "takeover" without Test Mode or a kernel driver. Recommends a spare Realtek USB dongle driven by Google's Bumble; a Linux live USB is the fallback. | Research only. The dongle prototype was stopped by an automatic safety check before any code was written, so nothing is built. Only needed if Stage 1 fails its gate. | [docs/stage2-research.md](docs/stage2-research.md) |
-| 3. Develop | DualConnect Tray: a notification-area icon plus a Win+Alt+A hotkey that moves the AirPods to or from the laptop by running the Stage 1 tool. It uses Windows' own Bluetooth connect/disconnect, so it does not depend on Stage 2. | Code written; compiles and passes 22 tests in a Linux container. Never run on Windows. | [stage3-app/](stage3-app/) |
+| 3. Develop | DualConnect Tray: a notification-area icon plus a Win+Alt+A hotkey that moves the AirPods to or from the laptop by running the Stage 1 tool. It uses Windows' own Bluetooth connect/disconnect, so it does not depend on Stage 2. | Code written and checked against the final Stage 1 tool on 9 Oct; compiles and passes 27 tests plus 5 contract tests against the real Stage 1 code in a Linux container. Never run on Windows. | [stage3-app/](stage3-app/) |
 
 The full reasoning, evidence and risks behind the stages are in [docs/feasibility-and-staged-plan.md](docs/feasibility-and-staged-plan.md).
 
@@ -32,7 +32,7 @@ The full reasoning, evidence and risks behind the stages are in [docs/feasibilit
 **Verified in a Linux container only** (by the sessions that wrote the code, per each folder's README):
 
 - [DualConnect](stage1-tools/README.md) compiles as C# 5 against .NET Framework reference assemblies, and its switching logic passed a simulation with fake audio endpoints (20 single-command cases and 12 cases of quick key presses, a killed command and a slow driver). The PowerShell scripts parse and pass a Windows PowerShell 5.1 compatibility check.
-- [The tray app](stage3-app/README.md#how-it-was-tested) compiles as C# 5 against .NET Framework 4.8 reference assemblies, and 22 tests of its non-Windows logic pass against a stand-in for DualConnect.
+- [The tray app](stage3-app/README.md#how-it-was-tested) compiles as C# 5 against .NET Framework 4.8 reference assemblies, 27 tests of its non-Windows logic pass against a stand-in for DualConnect, and 5 contract tests pass against the real Stage 1 code under Mono (which only covers its "nothing read" answers, since its Windows calls fail there).
 
 **Inference, untested on your setup:**
 

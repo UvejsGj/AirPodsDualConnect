@@ -82,11 +82,31 @@ namespace DualConnectTray
         private DualConnectResult lastResult;
         private DateTime lastStatusUtc = DateTime.MinValue;
         private string lastActionNote = "";
-        private string runningVerb;
-        private bool actionRunning, statusRunning, refreshQueued;
+        // Switches this tray started that haven't answered yet, oldest first (generation -> verb).
+        // Normally one. A press that moves the sound the other way starts a second, and DualConnect
+        // stops the first (INTERFACE.md, "One switch at a time": the newest key press wins).
+        private readonly SortedDictionary<int, string> running = new SortedDictionary<int, string>();
+        private const int MaxRunning = 3;
+        private DateTime lastActionStartUtc = DateTime.MinValue;
+        private bool statusRunning, refreshQueued;
         private int actionGeneration;
-        private readonly OutsideChangeDetector detector = new OutsideChangeDetector(TimeSpan.FromSeconds(5));
+        // 5 s: changes that soon after a switch are its own. 20 s: after a switch reported as failed,
+        // Windows may still finish it (INTERFACE.md), so a change that soon is that switch, not the iPhone.
+        private readonly OutsideChangeDetector detector = new OutsideChangeDetector(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(20));
         private int logFailures;
+
+        private bool ActionRunning { get { return running.Count > 0; } }
+
+        // The newest running switch's verb, or null.
+        private string RunningVerb
+        {
+            get
+            {
+                string verb = null;
+                foreach (KeyValuePair<int, string> kv in running) verb = kv.Value;
+                return verb;
+            }
+        }
 
         public TrayApplication()
         {
@@ -165,7 +185,8 @@ namespace DualConnectTray
             }
             settings = TraySettings.FromIni(ini);
             warnings.AddRange(settings.Warnings);
-            runner = new DualConnectRunner(DualConnectRunner.Locate(settings.DualConnectPath, trayFolder), settings.DeviceName, settings.TimeoutSeconds);
+            runner = new DualConnectRunner(DualConnectRunner.Locate(settings.DualConnectPath, trayFolder),
+                settings.DeviceName, settings.ContainerId, settings.TimeoutSeconds);
             RegisterHotkeys(warnings);
         }
 
@@ -247,28 +268,51 @@ namespace DualConnectTray
 
         private void OnHotkey(int id)
         {
-            string verb;
-            if (id == HotkeyToggle) verb = StateLogic.ToggleVerb(state);
-            else if (id == HotkeyTake) verb = "take";
-            else if (id == HotkeyGive) verb = "give";
-            else return;
             Hotkey hk;
-            RunAction(verb, "hotkey " + (hotkeys.TryGetValue(id, out hk) ? hk.Display : id.ToString()));
+            string trigger = "hotkey " + (hotkeys.TryGetValue(id, out hk) ? hk.Display : id.ToString());
+            if (id == HotkeyToggle) Toggle(trigger);
+            else if (id == HotkeyTake) RunAction("take", trigger);
+            else if (id == HotkeyGive) RunAction("give", trigger);
+        }
+
+        // The toggle hotkey or a toggle click. While a switch runs, the toggle reverses it, except
+        // within a second of its start, which is taken as an accidental double press.
+        private void Toggle(string trigger)
+        {
+            string current = RunningVerb;
+            string verb = StateLogic.ToggleVerb(state, current);
+            if (current != null && DateTime.UtcNow - lastActionStartUtc < TimeSpan.FromSeconds(1))
+            {
+                Log("busy", verb, null, null, trigger + " ignored: pressed again within a second");
+                return;
+            }
+            RunAction(verb, trigger);
         }
 
         private async void RunAction(string verb, string trigger)
         {
-            if (actionRunning)
+            // A second press the same way would only wait and then report "still running", so it is
+            // ignored. A press the other way goes ahead: DualConnect stops the running switch for it.
+            string reversing = RunningVerb;
+            if (reversing != null)
             {
-                Log("busy", verb, null, null, trigger + " ignored: " + StateLogic.VerbText(runningVerb) + " still running");
-                return;
+                string why = null;
+                if (StateLogic.MovesToLaptop(verb) == StateLogic.MovesToLaptop(reversing))
+                    why = StateLogic.VerbText(reversing) + " still running";
+                else if (running.Count >= MaxRunning)
+                    why = running.Count + " switches still running";
+                if (why != null)
+                {
+                    Log("busy", verb, null, null, trigger + " ignored: " + why);
+                    return;
+                }
             }
-            actionRunning = true;
-            runningVerb = verb;
-            actionGeneration++;
+            int generation = ++actionGeneration;
+            running[generation] = verb;
+            lastActionStartUtc = DateTime.UtcNow;
             detector.BeginAction();
             UpdateIcon();
-            Log("action-start", verb, null, null, trigger);
+            Log("action-start", verb, null, null, trigger + (reversing != null ? "; stops " + StateLogic.VerbText(reversing) : ""));
 
             DualConnectResult r;
             DualConnectRunner current = runner;
@@ -281,32 +325,45 @@ namespace DualConnectTray
                 r = new DualConnectResult { Verb = verb, ErrorText = "The tray could not run DualConnect: " + ex.Message };
             }
 
-            detector.EndAction(DateTime.UtcNow);
-            actionRunning = false;
-            runningVerb = null;
-            Log("action-end", verb, r.ExitCode, r.WallMs, OneLine(r.ErrorText.Length > 0 ? r.ErrorText : r.Message));
+            DateTime endedUtc = DateTime.UtcNow;
+            detector.EndAction(endedUtc);
+            running.Remove(generation);
+            bool newest = generation == actionGeneration;
+            ResultKind kind = StateLogic.Classify(r);
+            string detail = OneLine(r.ErrorText.Length > 0 ? r.ErrorText : r.Message);
 
+            if (!newest || kind == ResultKind.Superseded)
+            {
+                // A newer press took over: from this tray (its own result counts), or from another
+                // DualConnect such as the Stage 1 desktop shortcuts. Not a failure, so no notice.
+                Log("action-stopped", verb, r.ExitCode, r.WallMs, detail);
+                if (newest)
+                {
+                    lastActionNote = StateLogic.VerbText(verb) + " stopped by another DualConnect at " + DateTime.Now.ToString("t");
+                    ApplyActionResult(r);
+                }
+                else UpdateIcon();
+                if (!ActionRunning) ScheduleRefresh(1500);
+                return;
+            }
+
+            Log("action-end", verb, r.ExitCode, r.WallMs, detail);
             lastActionNote = StateLogic.VerbText(verb) + (r.Succeeded ? " done in " + Seconds(r.WallMs) : " failed") + " at " + DateTime.Now.ToString("t");
-            if (r.LaunchFailed) ApplyState(LaptopState.ToolMissing, r);
-            else if (r.JsonParsed && r.ExitCode != 1 && r.ExitCode != 3) ApplyState(StateLogic.FromEndpoints(r.Endpoints), r);
-            else UpdateIcon();
+            ApplyActionResult(r);
 
-            if (!r.Succeeded) Balloon(StateLogic.VerbText(verb) + " didn't finish", FailureText(r), ToolTipIcon.Warning);
-            ScheduleRefresh(1500);   // confirm with a fresh status a moment later
+            string failure = StateLogic.FailureText(kind, r, settings.DeviceName);
+            if (failure != null) Balloon(StateLogic.VerbText(verb) + " didn't finish", failure, ToolTipIcon.Warning);
+            // After its own result is shown, so only a later change counts as finishing late.
+            if (StateLogic.MayFinishLate(kind, r)) detector.NoteFailedSwitch(verb, endedUtc);
+            if (!ActionRunning) ScheduleRefresh(1500);   // confirm with a fresh status a moment later
         }
 
-        private static string FailureText(DualConnectResult r)
+        // Results that didn't read the AirPods (an empty endpoint list) leave the state as it was.
+        private void ApplyActionResult(DualConnectResult r)
         {
-            if (r.LaunchFailed) return "DualConnect could not be started. " + r.ErrorText + " Use \"Locate DualConnect.exe\" in the menu.";
-            if (r.TimedOut) return r.ErrorText;
-            switch (r.ExitCode)
-            {
-                case 2: return "Windows has no audio device matching the name in settings. Check that the AirPods are paired with Windows and DeviceName is right.";
-                case 3: return "Windows refused the request. " + r.Message;
-                case 4: return "Windows didn't confirm the change in time. The AirPods may be in the case, out of range, or busy with another device.";
-                case 1: return "DualConnect rejected the request: " + r.Message;
-            }
-            return r.ErrorText.Length > 0 ? r.ErrorText : ("DualConnect exit code " + r.ExitCode + ". " + r.Message);
+            LaptopState s;
+            if (StateLogic.TryStateAfterAction(r, out s)) ApplyState(s, r);
+            else UpdateIcon();
         }
 
         // ---------------------------------------------------------------- status
@@ -320,9 +377,9 @@ namespace DualConnectTray
 
         private async void RefreshStatus(string reason)
         {
-            if (statusRunning || actionRunning)
+            if (statusRunning || ActionRunning)
             {
-                refreshQueued = !actionRunning;   // an action schedules its own check when it ends
+                refreshQueued = !ActionRunning;   // an action schedules its own check when it ends
                 return;
             }
             statusRunning = true;
@@ -341,7 +398,7 @@ namespace DualConnectTray
             lastStatusUtc = DateTime.UtcNow;
 
             // A switch that started while this check ran makes its answer stale.
-            if (generation == actionGeneration && !actionRunning)
+            if (generation == actionGeneration && !ActionRunning)
             {
                 LaptopState s = StateLogic.FromStatus(r);
                 if (s == LaptopState.CheckFailed)
@@ -377,9 +434,28 @@ namespace DualConnectTray
                     Balloon("DualConnect.exe not found", "Looked for " + runner.ExePath + ". Use \"Locate DualConnect.exe\" in the menu.", ToolTipIcon.Warning);
                 else if (newState == LaptopState.NotPaired)
                     Balloon("No AirPods audio device in Windows", "Nothing matches \"" + settings.DeviceName + "\". Check the pairing in Windows and DeviceName in settings.", ToolTipIcon.Warning);
+                else if (newState == LaptopState.SeveralDevices)
+                {
+                    // DualConnect's message lists each device's name, connection and containerId.
+                    Log("several-devices", r.Verb, r.ExitCode, null, OneLine(r.Message));
+                    Balloon("More than one device matches \"" + settings.DeviceName + "\"",
+                        "DualConnect won't guess which pair is yours, so it sends nothing. Set ContainerId in the settings to yours; Status.cmd and the tray's log list each one.",
+                        ToolTipIcon.Warning);
+                }
             }
 
-            if (outside != null)
+            if (outside != null && outside.StartsWith("late-"))
+            {
+                // Windows finished a switch after DualConnect had reported it as failed.
+                string lateVerb = detector.LateVerb;
+                bool arrived = outside == "late-arrived";
+                Log(outside, lateVerb, null, null, (arrived ? "Windows connected" : "Windows disconnected")
+                    + " the AirPods shortly after " + StateLogic.VerbText(lateVerb) + " was reported as failed");
+                if (arrived == StateLogic.MovesToLaptop(lateVerb))
+                    Balloon(arrived ? "AirPods reached the laptop after all" : "AirPods left the laptop after all",
+                        "Windows finished the switch shortly after DualConnect reported it as failed.", ToolTipIcon.Info);
+            }
+            else if (outside != null)
             {
                 Log("outside-" + outside, null, null, null, outside == "left"
                     ? "Windows lost the AirPods without a switch from this tray"
@@ -483,15 +559,17 @@ namespace DualConnectTray
 
         private void RefreshMenu()
         {
-            headerItem.Text = actionRunning ? StateLogic.VerbText(runningVerb) + "..." : StateLogic.Describe(state);
+            string current = RunningVerb;
+            headerItem.Text = current != null ? StateLogic.VerbText(current) + "..." : StateLogic.Describe(state);
 
             string device = lastResult == null ? "" : StateLogic.DeviceLabel(lastResult.Endpoints);
             string checkedAt = lastStatusUtc == DateTime.MinValue ? "not checked yet" : "checked " + lastStatusUtc.ToLocalTime().ToString("t");
             detailItem.Text = (device.Length > 0 ? device + ", " : "") + checkedAt + (lastActionNote.Length > 0 ? "; " + lastActionNote : "");
 
-            bool on = StateLogic.IsOnLaptop(state);
-            takeItem.Enabled = !actionRunning;
-            giveItem.Enabled = !actionRunning;
+            // While a switch runs, only the opposite one is offered: it stops the running one.
+            bool on = StateLogic.ToggleVerb(state, current) == "give";   // what the toggle does next
+            takeItem.Enabled = current == null || !StateLogic.MovesToLaptop(current);
+            giveItem.Enabled = current == null || StateLogic.MovesToLaptop(current);
             takeItem.Font = on ? regularFont : boldFont;     // bold = what the toggle hotkey does next
             giveItem.Font = on ? boldFont : regularFont;
             takeItem.ShortcutKeyDisplayString = HotkeyText(on ? HotkeyTake : HotkeyToggle, HotkeyTake);
@@ -502,7 +580,7 @@ namespace DualConnectTray
             startupItem.Checked = StartupPointsHere();
             locateItem.Visible = state == LaptopState.ToolMissing;
 
-            if (!actionRunning && DateTime.UtcNow - lastStatusUtc > TimeSpan.FromSeconds(15)) RefreshStatus("menu");
+            if (!ActionRunning && DateTime.UtcNow - lastStatusUtc > TimeSpan.FromSeconds(15)) RefreshStatus("menu");
         }
 
         private string HotkeyText(int preferredId, int fallbackId)
@@ -517,7 +595,7 @@ namespace DualConnectTray
             if (e.Button != MouseButtons.Left) return;
             if (settings.LeftClickToggles)
             {
-                RunAction(StateLogic.ToggleVerb(state), "tray click");
+                Toggle("tray click");
                 return;
             }
             // NotifyIcon opens its menu only on right click; this private method is the one it uses.
@@ -530,10 +608,10 @@ namespace DualConnectTray
         {
             string key;
             string text;
-            if (actionRunning)
+            if (ActionRunning)
             {
                 key = "busy";
-                text = "DualConnect: " + StateLogic.VerbText(runningVerb) + "...";
+                text = "DualConnect: " + StateLogic.VerbText(RunningVerb) + "...";
             }
             else
             {
@@ -731,7 +809,7 @@ namespace DualConnectTray
         {
             if (string.IsNullOrEmpty(s)) return "";
             string t = s.Replace("\r", " ").Replace("\n", " ").Trim();
-            return t.Length > 500 ? t.Substring(0, 500) + "..." : t;
+            return t.Length > 1000 ? t.Substring(0, 1000) + "..." : t;
         }
 
         private static string Truncate(string s, int max)

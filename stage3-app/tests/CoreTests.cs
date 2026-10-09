@@ -26,9 +26,13 @@ internal static class CoreTests
         Run("result from DualConnect output", ResultFromOutput);
         Run("state from endpoints", StateFromEndpoints);
         Run("state from status exit codes", StateFromExitCodes);
+        Run("result kinds from DualConnect's messages", ResultKinds);
+        Run("state after a switch ignores unread endpoint lists", StateAfterAction);
+        Run("failure notices", FailureNotices);
         Run("toggle verb", ToggleVerb);
         Run("tooltip never exceeds 63 characters", TooltipLimit);
         Run("outside change detector", OutsideChanges);
+        Run("late finish of a failed switch", LateFinish);
         Run("argument quoting round-trips through Windows rules", QuotingRoundTrip);
         Run("csv row escaping round-trips", CsvRoundTrip);
         Run("log summary", Summary);
@@ -39,6 +43,7 @@ internal static class CoreTests
             Run("runner: failure exit codes", RunnerFailures);
             Run("runner: garbage output", RunnerGarbage);
             Run("runner: chatty output and stderr", RunnerChatty);
+            Run("runner: final-contract cases (two pairs, busy, stopped, lock, watchdog)", RunnerContractCases);
             Run("runner: missing tool", RunnerMissing);
             Run("runner: timeout kills the process", RunnerTimeout);
         }
@@ -98,21 +103,29 @@ internal static class CoreTests
         Eq("", s.DualConnectPath, "path");
         Eq(false, s.LeftClickToggles, "left click");
         Eq(true, s.NotifyOnOutsideChanges, "notify");
-        Eq(15, s.TimeoutSeconds, "timeout");
+        Eq(20, s.TimeoutSeconds, "timeout matches DualConnect's default");
         Eq(60, s.SafetyPollSeconds, "poll");
+        Eq("", s.ContainerId, "container");
     }
 
     private static void BadSettingsWarn()
     {
         TraySettings s = TraySettings.FromIni(IniFile.Parse(
-            "DeviceName=\nLeftClick=sometimes\nNotifyOnOutsideChanges=maybe\nTimeoutSeconds=999\nSafetyPollSeconds=5\nDualConnectPath=\"C:\\a b\\DualConnectW.exe\"\n"));
+            "DeviceName=\nLeftClick=sometimes\nNotifyOnOutsideChanges=maybe\nTimeoutSeconds=999\nSafetyPollSeconds=5\nDualConnectPath=\"C:\\a b\\DualConnectW.exe\"\nContainerId=my airpods\n"));
         Eq("AirPods", s.DeviceName, "device fallback");
         Eq(false, s.LeftClickToggles, "left click fallback");
         Eq(true, s.NotifyOnOutsideChanges, "notify fallback");
-        Eq(15, s.TimeoutSeconds, "timeout fallback");
+        Eq(20, s.TimeoutSeconds, "timeout fallback");
+        Eq("", s.ContainerId, "bad container ignored");
         Eq(10, s.SafetyPollSeconds, "poll raised to 10");
         Eq(@"C:\a b\DualConnectW.exe", s.DualConnectPath, "quotes removed");
-        Eq(5, s.Warnings.Count, "warnings: " + string.Join(" | ", s.Warnings.ToArray()));
+        Eq(6, s.Warnings.Count, "warnings: " + string.Join(" | ", s.Warnings.ToArray()));
+        Eq(1, TraySettings.FromIni(IniFile.Parse("TimeoutSeconds=5")).Warnings.Count, "timeout below 10 rejected");
+        Eq(10, TraySettings.FromIni(IniFile.Parse("TimeoutSeconds=10")).TimeoutSeconds, "10 allowed");
+        TraySettings c = TraySettings.FromIni(IniFile.Parse("ContainerId=\"{6F1D2A3B-0000-1111-2222-333344445555}\""));
+        Eq("6f1d2a3b-0000-1111-2222-333344445555", c.ContainerId, "container normalised as DualConnect prints it");
+        Eq(0, c.Warnings.Count, "container accepted");
+        Eq(0, TraySettings.FromIni(IniFile.Parse("ContainerId=")).Warnings.Count, "empty container allowed");
         Eq(0, TraySettings.FromIni(IniFile.Parse("SafetyPollSeconds=0\nLeftClick=toggle")).Warnings.Count, "0 = off is allowed");
         True(TraySettings.FromIni(IniFile.Parse("LeftClick=Toggle")).LeftClickToggles, "toggle accepted");
     }
@@ -185,8 +198,8 @@ internal static class CoreTests
 
     private const string SampleJson =
         "{\"command\":\"take\",\"ok\":true,\"exitCode\":0,\"elapsedMs\":2380,\"message\":\"done\",\"endpoints\":[" +
-        "{\"name\":\"Kopfh\\u00f6rer (AirPods Pro)\",\"deviceName\":\"AirPods Pro\",\"flow\":\"render\",\"state\":\"active\",\"isDefault\":true,\"peak\":0.12,\"id\":\"{0.0.0.00000000}.{aaaa}\",\"filterId\":\"{2}.\\\\?\\\\bthenum#x\"}," +
-        "{\"name\":\"Headset (AirPods Pro)\",\"deviceName\":\"AirPods Pro\",\"flow\":\"capture\",\"state\":\"unplugged\",\"isDefault\":false,\"peak\":-1,\"id\":\"{0.0.1.00000000}.{bbbb}\"}]}";
+        "{\"name\":\"Kopfh\\u00f6rer (AirPods Pro)\",\"deviceName\":\"AirPods Pro\",\"flow\":\"render\",\"state\":\"active\",\"isDefault\":true,\"peak\":0.12,\"id\":\"{0.0.0.00000000}.{aaaa}\",\"filterId\":\"{2}.\\\\?\\\\bthenum#x\",\"containerId\":\"6f1d2a3b-0000-1111-2222-333344445555\"}," +
+        "{\"name\":\"Headset (AirPods Pro)\",\"deviceName\":\"AirPods Pro\",\"flow\":\"capture\",\"state\":\"unplugged\",\"isDefault\":false,\"peak\":-1,\"id\":\"{0.0.1.00000000}.{bbbb}\",\"filterId\":null,\"containerId\":null}]}";
 
     private static void ResultFromOutput()
     {
@@ -202,6 +215,9 @@ internal static class CoreTests
         True(r.Endpoints[0].IsRender && r.Endpoints[0].IsActive && r.Endpoints[0].IsDefault, "render active default");
         Eq(0.12, r.Endpoints[0].Peak, "peak");
         True(!r.Endpoints[1].IsActive && !r.Endpoints[1].IsRender, "capture unplugged");
+        Eq("6f1d2a3b-0000-1111-2222-333344445555", r.Endpoints[0].ContainerId, "containerId");
+        Eq("", r.Endpoints[1].ContainerId, "null containerId");
+        True(r.Endpoints[0].IsPresent && r.Endpoints[1].IsPresent, "active and unplugged are present");
 
         DualConnectResult none = DualConnectResult.FromOutput("status", 0, "", "boom");
         True(!none.JsonParsed && none.ErrorText.Length > 0, "no json");
@@ -223,7 +239,7 @@ internal static class CoreTests
 
     private static void StateFromEndpoints()
     {
-        Eq(LaptopState.NotPaired, StateLogic.FromEndpoints(new List<EndpointInfo>()), "empty");
+        Eq(LaptopState.Unknown, StateLogic.FromEndpoints(new List<EndpointInfo>()), "empty list is unread, not 'not paired'");
         Eq(LaptopState.OnLaptop, StateLogic.FromEndpoints(new List<EndpointInfo> { Ep("render", "active", true), Ep("capture", "active", false) }), "on");
         Eq(LaptopState.OnLaptopNotDefault, StateLogic.FromEndpoints(new List<EndpointInfo> { Ep("render", "active", false) }), "not default");
         Eq(LaptopState.OnLaptop, StateLogic.FromEndpoints(new List<EndpointInfo> { Ep("render", "active", false), Ep("render", "active", true) }), "two renders, one default");
@@ -232,25 +248,122 @@ internal static class CoreTests
         Eq(LaptopState.NotOnLaptop, StateLogic.FromEndpoints(new List<EndpointInfo> { Ep("render", "notpresent", false), Ep("render", "disabled", false) }), "notpresent/disabled");
     }
 
+    private static DualConnectResult Res(int exitCode, string message, params EndpointInfo[] eps)
+    {
+        var r = new DualConnectResult { ExitCode = exitCode, Message = message, JsonParsed = true };
+        r.Endpoints.AddRange(eps);
+        return r;
+    }
+
+    // Messages as stage1-tools/DualConnect.cs words them (9 Oct 2026).
+    private const string MsgSeveral = "2 paired devices match the name: 'AirPods Pro' (connected, containerId 6f1d2a3b-0000-1111-2222-333344445555), 'AirPods Pro' (not connected, containerId 0a0b0c0d-9999-8888-7777-666655554444). Some have the same name, so --name can't tell them apart: add --container with the containerId of yours.";
+    private const string MsgStopped = "reconnect sent to 1 filter(s). stopped because a newer DualConnect command started; asked Windows to drop the connect it had started";
+    private const string MsgReplaced = "replaced by a newer DualConnect command; nothing was sent";
+    private const string MsgSameWay = "an earlier DualConnect command moving the sound the same way is still running; nothing was sent";
+    private const string MsgOtherWay = "another DualConnect command is still running and did not stop; nothing was sent";
+    private const string MsgLock = "could not open the DualConnect lock: Access to the path is denied.; nothing was sent";
+    private const string MsgWatchdog = "a Windows audio call did not return; gave up";
+    private const string MsgNotConnected = "not connected at timeout; the AirPods may be in the case, out of range or busy with the iPhone";
+    private const string MsgStillConnected = "still connected at timeout; nothing else was sent";
+
     private static void StateFromExitCodes()
     {
         Eq(LaptopState.Unknown, StateLogic.FromStatus(null), "null");
         Eq(LaptopState.ToolMissing, StateLogic.FromStatus(new DualConnectResult { LaunchFailed = true }), "launch failed");
         Eq(LaptopState.CheckFailed, StateLogic.FromStatus(new DualConnectResult { TimedOut = true, JsonParsed = true }), "timeout");
         Eq(LaptopState.CheckFailed, StateLogic.FromStatus(new DualConnectResult { ExitCode = 0 }), "no json");
-        Eq(LaptopState.NotPaired, StateLogic.FromStatus(new DualConnectResult { ExitCode = 2, JsonParsed = true }), "exit 2");
-        Eq(LaptopState.CheckFailed, StateLogic.FromStatus(new DualConnectResult { ExitCode = 3, JsonParsed = true }), "exit 3");
-        Eq(LaptopState.CheckFailed, StateLogic.FromStatus(new DualConnectResult { ExitCode = 1, JsonParsed = true }), "exit 1");
+        Eq(LaptopState.NotPaired, StateLogic.FromStatus(Res(2, "no Bluetooth audio endpoint matches 'AirPods'")), "exit 2");
+        Eq(LaptopState.CheckFailed, StateLogic.FromStatus(Res(3, MsgWatchdog)), "exit 3");
+        Eq(LaptopState.CheckFailed, StateLogic.FromStatus(Res(1, "--container must be a containerId as shown by status")), "exit 1 usage");
+        Eq(LaptopState.SeveralDevices, StateLogic.FromStatus(Res(1, MsgSeveral, Ep("render", "active", true))), "exit 1, two pairs");
+        Eq(LaptopState.CheckFailed, StateLogic.FromStatus(Res(0, "connected")), "exit 0 with no endpoints breaks the contract");
+        Eq(LaptopState.CheckFailed, StateLogic.FromStatus(Res(4, MsgReplaced, Ep("render", "active", true))), "status never returns 4");
         DualConnectResult ok = DualConnectResult.FromOutput("status", 0, SampleJson, "");
         Eq(LaptopState.OnLaptop, StateLogic.FromStatus(ok), "exit 0 with active default render");
+    }
+
+    private static void ResultKinds()
+    {
+        Eq(ResultKind.Done, StateLogic.Classify(Res(0, "connected")), "0");
+        Eq(ResultKind.Done, StateLogic.Classify(Res(0, "already connected by the previous command")), "0 already");
+        Eq(ResultKind.SeveralDevices, StateLogic.Classify(Res(1, MsgSeveral + " Nothing was sent.")), "1 several");
+        Eq(ResultKind.BadArguments, StateLogic.Classify(Res(1, "--timeout must be 1 to 120 seconds")), "1 usage");
+        Eq(ResultKind.NotFound, StateLogic.Classify(Res(2, "no Bluetooth audio endpoint matches 'AirPods'")), "2");
+        Eq(ResultKind.LockError, StateLogic.Classify(Res(3, MsgLock)), "3 lock");
+        Eq(ResultKind.NoAnswer, StateLogic.Classify(Res(3, MsgWatchdog)), "3 watchdog");
+        Eq(ResultKind.Refused, StateLogic.Classify(Res(3, "Windows refused the connect")), "3 refused");
+        Eq(ResultKind.Refused, StateLogic.Classify(Res(3, "COMException: boom (hr=0x80070005)")), "3 exception");
+        Eq(ResultKind.Superseded, StateLogic.Classify(Res(4, MsgStopped)), "4 stopped");
+        Eq(ResultKind.Superseded, StateLogic.Classify(Res(4, "stopped because a newer DualConnect command started; nothing was sent")), "4 stopped before sending");
+        Eq(ResultKind.Superseded, StateLogic.Classify(Res(4, MsgReplaced)), "4 replaced");
+        Eq(ResultKind.StillRunning, StateLogic.Classify(Res(4, MsgSameWay)), "4 same way still running");
+        Eq(ResultKind.StillRunning, StateLogic.Classify(Res(4, MsgOtherWay)), "4 other way still running");
+        Eq(ResultKind.NotConfirmed, StateLogic.Classify(Res(4, MsgNotConnected)), "4 not connected");
+        Eq(ResultKind.NotConfirmed, StateLogic.Classify(Res(4, MsgStillConnected)), "4 still connected");
+        Eq(ResultKind.Unreadable, StateLogic.Classify(Res(7, "x")), "unknown exit code");
+        Eq(ResultKind.TrayStopped, StateLogic.Classify(new DualConnectResult { TimedOut = true, JsonParsed = true, ExitCode = 0 }), "tray stopped it");
+        Eq(ResultKind.LaunchFailed, StateLogic.Classify(new DualConnectResult { LaunchFailed = true }), "launch");
+        Eq(ResultKind.Unreadable, StateLogic.Classify(new DualConnectResult { ExitCode = 0 }), "no json");
+    }
+
+    private static void StateAfterAction()
+    {
+        LaptopState s;
+        True(!StateLogic.TryStateAfterAction(Res(3, MsgWatchdog), out s), "watchdog: list not read");
+        True(!StateLogic.TryStateAfterAction(Res(3, MsgLock), out s), "lock error: list not read");
+        True(!StateLogic.TryStateAfterAction(Res(4, MsgReplaced), out s), "replaced, read failed: empty list");
+        True(!StateLogic.TryStateAfterAction(Res(3, "NullReferenceException: x"), out s), "exception: empty list");
+        True(!StateLogic.TryStateAfterAction(Res(1, "unknown command: x"), out s), "usage");
+        True(!StateLogic.TryStateAfterAction(new DualConnectResult { TimedOut = true, JsonParsed = true }, out s), "tray stopped it");
+        True(!StateLogic.TryStateAfterAction(new DualConnectResult { ExitCode = 0 }, out s), "no json");
+        True(StateLogic.TryStateAfterAction(Res(2, "no Bluetooth audio endpoint matches 'AirPods'"), out s) && s == LaptopState.NotPaired, "exit 2 empty is not paired");
+        True(StateLogic.TryStateAfterAction(Res(1, MsgSeveral, Ep("render", "active", true)), out s) && s == LaptopState.SeveralDevices, "two pairs");
+        True(StateLogic.TryStateAfterAction(Res(4, MsgSameWay, Ep("render", "active", true)), out s) && s == LaptopState.OnLaptop, "still running lists endpoints");
+        True(StateLogic.TryStateAfterAction(Res(4, MsgNotConnected, Ep("render", "unplugged", false)), out s) && s == LaptopState.NotOnLaptop, "not confirmed");
+        True(StateLogic.TryStateAfterAction(Res(3, "Windows refused the connect", Ep("render", "active", false)), out s) && s == LaptopState.OnLaptopNotDefault, "refused, endpoints read");
+        True(StateLogic.TryStateAfterAction(new DualConnectResult { LaunchFailed = true }, out s) && s == LaptopState.ToolMissing, "launch failed");
+    }
+
+    private static void FailureNotices()
+    {
+        Eq<string>(null, StateLogic.FailureText(ResultKind.Done, Res(0, "connected"), "AirPods"), "done");
+        Eq<string>(null, StateLogic.FailureText(ResultKind.Superseded, Res(4, MsgStopped), "AirPods"), "stopped by a newer press");
+        var seen = new Dictionary<string, ResultKind>();
+        foreach (ResultKind k in Enum.GetValues(typeof(ResultKind)))
+        {
+            if (k == ResultKind.Done || k == ResultKind.Superseded) continue;
+            var r = Res(4, "");
+            r.ErrorText = "x";
+            string text = StateLogic.FailureText(k, r, "AirPods");
+            True(!string.IsNullOrEmpty(text), "text for " + k);
+            True(text.Length <= 255, k + " fits a notification: " + text.Length);
+            if (k != ResultKind.BadArguments && k != ResultKind.Refused && k != ResultKind.Unreadable)
+            {
+                True(!seen.ContainsKey(text), k + " has its own wording");
+                seen[text] = k;
+            }
+        }
+        True(StateLogic.MayFinishLate(ResultKind.NotConfirmed, Res(4, MsgNotConnected)), "timeout may finish late");
+        True(StateLogic.MayFinishLate(ResultKind.NotConfirmed, Res(4, MsgStillConnected)), "the disconnect half was sent");
+        True(StateLogic.MayFinishLate(ResultKind.NoAnswer, Res(3, MsgWatchdog)), "watchdog may finish late");
+        True(StateLogic.MayFinishLate(ResultKind.TrayStopped, new DualConnectResult { TimedOut = true }), "tray-stopped may finish late");
+        True(!StateLogic.MayFinishLate(ResultKind.StillRunning, Res(4, MsgSameWay)), "nothing was sent");
+        True(!StateLogic.MayFinishLate(ResultKind.LockError, Res(3, MsgLock)), "lock: nothing was sent");
+        True(!StateLogic.MayFinishLate(ResultKind.SeveralDevices, Res(1, MsgSeveral)), "two pairs: nothing was sent");
+        True(!StateLogic.MayFinishLate(ResultKind.Done, Res(0, "connected")), "done");
     }
 
     private static void ToggleVerb()
     {
         Eq("give", StateLogic.ToggleVerb(LaptopState.OnLaptop), "on");
         Eq("give", StateLogic.ToggleVerb(LaptopState.OnLaptopNotDefault), "on not default");
-        foreach (LaptopState s in new[] { LaptopState.NotOnLaptop, LaptopState.Unknown, LaptopState.NotPaired, LaptopState.ToolMissing, LaptopState.CheckFailed })
+        foreach (LaptopState s in new[] { LaptopState.NotOnLaptop, LaptopState.Unknown, LaptopState.NotPaired, LaptopState.SeveralDevices, LaptopState.ToolMissing, LaptopState.CheckFailed })
             Eq("take", StateLogic.ToggleVerb(s), s.ToString());
+        Eq("give", StateLogic.ToggleVerb(LaptopState.NotOnLaptop, "take"), "a running take is reversed");
+        Eq("take", StateLogic.ToggleVerb(LaptopState.OnLaptop, "give"), "a running give is reversed");
+        Eq("give", StateLogic.ToggleVerb(LaptopState.OnLaptop, null), "nothing running");
+        True(StateLogic.MovesToLaptop("take") && StateLogic.MovesToLaptop("connect"), "to laptop");
+        True(!StateLogic.MovesToLaptop("give") && !StateLogic.MovesToLaptop("disconnect"), "away");
     }
 
     private static void TooltipLimit()
@@ -283,6 +396,43 @@ internal static class CoreTests
         d.EndAction(t0.AddSeconds(61));
         d.EndAction(t0.AddSeconds(61));   // extra end must not go negative
         Eq("left", d.Classify(LaptopState.OnLaptop, LaptopState.NotOnLaptop, t0.AddSeconds(70)), "all ended");
+    }
+
+    private static void LateFinish()
+    {
+        var d = new OutsideChangeDetector(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(20));
+        DateTime t0 = new DateTime(2026, 10, 9, 12, 0, 0, DateTimeKind.Utc);
+        d.BeginAction();
+        d.EndAction(t0);
+        Eq<string>(null, d.Classify(LaptopState.OnLaptop, LaptopState.NotOnLaptop, t0), "the failed take's own result (its disconnect half)");
+        d.NoteFailedSwitch("take", t0);
+        Eq<string>(null, d.Classify(LaptopState.NotOnLaptop, LaptopState.NotOnLaptop, t0.AddSeconds(2)), "no change");
+        Eq("late-arrived", d.Classify(LaptopState.NotOnLaptop, LaptopState.OnLaptop, t0.AddSeconds(3)), "arrival inside the grace period is the take finishing");
+        Eq("take", d.LateVerb, "which switch");
+        Eq<string>(null, d.Classify(LaptopState.OnLaptop, LaptopState.NotOnLaptop, t0.AddSeconds(4)), "reported once; then the normal grace applies");
+        Eq("left", d.Classify(LaptopState.OnLaptop, LaptopState.NotOnLaptop, t0.AddSeconds(8)), "later moves are outside changes again");
+
+        DateTime t1 = t0.AddMinutes(1);
+        d.BeginAction();
+        d.EndAction(t1);
+        d.NoteFailedSwitch("give", t1);
+        Eq("late-left", d.Classify(LaptopState.OnLaptop, LaptopState.NotOnLaptop, t1.AddSeconds(19)), "inside 20 s");
+        Eq("give", d.LateVerb, "give");
+
+        DateTime t2 = t0.AddMinutes(2);
+        d.BeginAction();
+        d.EndAction(t2);
+        d.NoteFailedSwitch("take", t2);
+        Eq("arrived", d.Classify(LaptopState.NotOnLaptop, LaptopState.OnLaptop, t2.AddSeconds(25)), "after 20 s it's an outside change");
+
+        DateTime t3 = t0.AddMinutes(3);
+        d.BeginAction();
+        d.EndAction(t3);
+        d.NoteFailedSwitch("take", t3);
+        d.BeginAction();
+        Eq<string>(null, d.Classify(LaptopState.NotOnLaptop, LaptopState.OnLaptop, t3.AddSeconds(1)), "a newer switch is running");
+        d.EndAction(t3.AddSeconds(2));
+        Eq<string>(null, d.Classify(LaptopState.NotOnLaptop, LaptopState.OnLaptop, t3.AddSeconds(3)), "the newer switch cleared the failed one");
     }
 
     // Windows' own splitting rules (CommandLineToArgvW / MSVC runtime), used as the reference.
@@ -349,11 +499,26 @@ internal static class CoreTests
         }
         Eq("AirPods", ArgQuote.Quote("AirPods"), "plain stays plain");
         Eq("\"\"", ArgQuote.Quote(""), "empty quoted");
-        var runner = new DualConnectRunner("x", "AirPods Pro", 15);
-        Eq("take --json --name \"AirPods Pro\" --timeout 15", runner.BuildArguments("take"), "take args");
+        var runner = new DualConnectRunner("x", "AirPods Pro", 20);
+        Eq("take --json --name \"AirPods Pro\" --timeout 20", runner.BuildArguments("take"), "take args");
         Eq("status --json --name \"AirPods Pro\"", runner.BuildArguments("status"), "status has no timeout");
-        Eq(45000, runner.WaitBudgetMs("take"), "take budget covers disconnect + connect");
-        Eq(20000, runner.WaitBudgetMs("status"), "status budget");
+        var mine = new DualConnectRunner("x", "AirPods", "6f1d2a3b-0000-1111-2222-333344445555", 20);
+        Eq("status --json --name AirPods --container 6f1d2a3b-0000-1111-2222-333344445555", mine.BuildArguments("status"), "status with container");
+        Eq("give --json --name AirPods --container 6f1d2a3b-0000-1111-2222-333344445555 --timeout 20", mine.BuildArguments("give"), "give with container");
+        Eq(65000, runner.WaitBudgetMs("take"), "take budget");
+        Eq(45000, runner.WaitBudgetMs("give"), "give budget");
+        Eq(25000, runner.WaitBudgetMs("status"), "status budget");
+        // INTERFACE.md: DualConnect answers by itself within 15 s for status, and within about
+        // 5.5 s + --timeout + 8 s for a switch (twice --timeout for take). The tray must wait longer,
+        // with at least 10 s left for starting the process.
+        True(runner.WaitBudgetMs("status") >= 15000 + 10000, "status outlasts DualConnect's watchdog");
+        foreach (int t in new[] { 10, 20, 60, 120 })
+        {
+            var rt = new DualConnectRunner("x", "AirPods", t);
+            True(rt.WaitBudgetMs("take") >= (5500 + 2 * t * 1000 + 8000) + 10000, "take outlasts the watchdog at " + t);
+            True(rt.WaitBudgetMs("give") >= (5500 + t * 1000 + 8000) + 10000, "give outlasts the watchdog at " + t);
+            True(rt.WaitBudgetMs("give") >= 20000 + 10000, "give outlasts the lock-wait watchdog at " + t);
+        }
     }
 
     private static void CsvRoundTrip()
@@ -389,6 +554,8 @@ internal static class CoreTests
         rows.Add(CsvLog.Row(baseTime.AddMinutes(13), "outside-arrived", LaptopState.OnLaptop, null, null, null, ""));
         rows.Add(CsvLog.Row(baseTime.AddMinutes(14), "outside-left", LaptopState.NotOnLaptop, null, null, null, ""));
         rows.Add(CsvLog.Row(baseTime.AddMinutes(15), "busy", LaptopState.OnLaptop, "give", null, null, ""));
+        rows.Add(CsvLog.Row(baseTime.AddMinutes(16), "action-stopped", LaptopState.OnLaptop, "take", 4, 900, "stopped because a newer DualConnect command started"));
+        rows.Add(CsvLog.Row(baseTime.AddMinutes(17), "late-arrived", LaptopState.OnLaptop, "take", null, null, ""));
         rows.Add("garbage line");
 
         string text = LogSummary.Summarize(rows, baseTime.AddDays(-7));
@@ -399,6 +566,8 @@ internal static class CoreTests
         True(text.Contains("without you asking: 2"), "left 2: " + text);
         True(text.Contains("joined the laptop without you asking: 1"), "arrived 1: " + text);
         True(text.Contains("ignored while a switch was running: 1"), "busy: " + text);
+        True(text.Contains("stopped by a newer key press (not counted above): 1"), "stopped: " + text);
+        True(text.Contains("reported as failed: 1"), "late: " + text);
         True(!text.Contains("99.9"), "old row excluded");
         Eq("No log rows in this period yet.", LogSummary.Summarize(new List<string> { CsvLog.Header }, baseTime), "empty");
         Eq(3L, LogSummary.Percentile(new List<long> { 5, 1, 3 }, 50), "odd median");
@@ -492,7 +661,58 @@ internal static class CoreTests
             Environment.SetEnvironmentVariable("FAKE_MODE", "notconfirmed");
             DualConnectResult nc = runner.Run("take");
             Eq(4, nc.ExitCode, "exit 4");
+            Eq(ResultKind.NotConfirmed, StateLogic.Classify(nc), "timeout kind");
             Eq(LaptopState.NotOnLaptop, StateLogic.FromEndpoints(nc.Endpoints), "endpoints still read on exit 4");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("FAKE_MODE", "");
+            File.Delete(stateFile);
+        }
+    }
+
+    private static void RunnerContractCases()
+    {
+        string stateFile = NewStateFile("on");
+        try
+        {
+            var runner = new DualConnectRunner(fakeTool, "AirPods", 20);
+            LaptopState s;
+
+            Environment.SetEnvironmentVariable("FAKE_MODE", "several");
+            DualConnectResult two = runner.Run("status");
+            Eq(LaptopState.SeveralDevices, StateLogic.FromStatus(two), "two pairs: status");
+            Eq(4, two.Endpoints.Count, "both pairs listed");
+            DualConnectResult twoTake = runner.Run("take");
+            Eq(ResultKind.SeveralDevices, StateLogic.Classify(twoTake), "two pairs: take");
+            var mine = new DualConnectRunner(fakeTool, "AirPods", "6f1d2a3b-0000-1111-2222-333344445555", 20);
+            DualConnectResult picked = mine.Run("status");
+            Eq(LaptopState.OnLaptop, StateLogic.FromStatus(picked), "--container picks one");
+            True(picked.Message.Contains("\"--container\", \"6f1d2a3b-0000-1111-2222-333344445555\""), "container passed: " + picked.Message);
+
+            Environment.SetEnvironmentVariable("FAKE_MODE", "stillrunning");
+            DualConnectResult busy = runner.Run("give");
+            Eq(ResultKind.StillRunning, StateLogic.Classify(busy), "still running");
+            True(StateLogic.TryStateAfterAction(busy, out s) && s == LaptopState.OnLaptop, "still running keeps reading the AirPods");
+
+            Environment.SetEnvironmentVariable("FAKE_MODE", "replaced");
+            Eq(ResultKind.Superseded, StateLogic.Classify(runner.Run("take")), "replaced");
+
+            Environment.SetEnvironmentVariable("FAKE_MODE", "stopped");
+            DualConnectResult stopped = runner.Run("take");
+            Eq(ResultKind.Superseded, StateLogic.Classify(stopped), "stopped");
+            Eq<string>(null, StateLogic.FailureText(StateLogic.Classify(stopped), stopped, "AirPods"), "no notice for a stopped switch");
+
+            Environment.SetEnvironmentVariable("FAKE_MODE", "lockerror");
+            DualConnectResult lockErr = runner.Run("take");
+            Eq(ResultKind.LockError, StateLogic.Classify(lockErr), "lock error");
+            True(!StateLogic.TryStateAfterAction(lockErr, out s), "lock error leaves the state alone");
+
+            Environment.SetEnvironmentVariable("FAKE_MODE", "watchdog");
+            DualConnectResult dog = runner.Run("take");
+            Eq(ResultKind.NoAnswer, StateLogic.Classify(dog), "watchdog");
+            True(!StateLogic.TryStateAfterAction(dog, out s), "watchdog leaves the state alone");
+            Eq(LaptopState.CheckFailed, StateLogic.FromStatus(runner.Run("status")), "watchdog on status");
         }
         finally
         {

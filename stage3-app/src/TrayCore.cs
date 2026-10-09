@@ -93,12 +93,13 @@ namespace DualConnectTray
 
         public string DualConnectPath = "";      // empty: look next to the tray, then in ..\stage1-tools
         public string DeviceName = "AirPods";    // passed to DualConnect --name
+        public string ContainerId = "";          // passed to DualConnect --container when set
         public string ToggleHotkey = "Win+Alt+A";
         public string TakeHotkey = "";           // empty: no hotkey
         public string GiveHotkey = "";
         public bool LeftClickToggles = false;    // false: a left click opens the menu
         public bool NotifyOnOutsideChanges = true;
-        public int TimeoutSeconds = 15;          // passed to DualConnect --timeout
+        public int TimeoutSeconds = 20;          // passed to DualConnect --timeout; its own default is 20
         public int SafetyPollSeconds = 60;       // status check even when Windows reports no change; 0 = off
 
         public readonly List<string> Warnings = new List<string>();
@@ -117,6 +118,10 @@ namespace DualConnectTray
                 "; Text that the AirPods' audio endpoint name contains (DualConnect --name).",
                 "DeviceName=AirPods",
                 "",
+                "; Only needed when two paired devices match DeviceName (DualConnect then sends nothing).",
+                "; The containerId of yours, as stage1-tools\\Status.cmd lists it. Empty = DeviceName alone.",
+                "ContainerId=",
+                "",
                 "; Hotkeys: modifiers Ctrl, Alt, Shift, Win joined with +, then one key (A-Z, 0-9, F1-F24,",
                 "; Space, Insert, Delete, Home, End, PageUp, PageDown, Pause). Empty = no hotkey.",
                 "; Toggle gives the AirPods back when Windows reports them connected, otherwise takes them.",
@@ -132,8 +137,9 @@ namespace DualConnectTray
                 "; Show a notification when the AirPods join or leave the laptop without you asking.",
                 "NotifyOnOutsideChanges=true",
                 "",
-                "; Seconds DualConnect waits for the connection to settle (DualConnect --timeout).",
-                "TimeoutSeconds=15",
+                "; Seconds DualConnect waits for each step (DualConnect --timeout, 10 to 120).",
+                "; Sound to laptop can use it twice: once for the old link to drop, once to connect.",
+                "TimeoutSeconds=20",
                 "",
                 "; Extra status check every N seconds in case Windows misses an event. 0 = off.",
                 "SafetyPollSeconds=60",
@@ -157,6 +163,15 @@ namespace DualConnectTray
                 else s.DeviceName = v;
             }
 
+            v = ini.Get("ContainerId");
+            if (v != null)
+            {
+                v = Unquote(v);
+                Guid id;
+                if (Guid.TryParse(v, out id)) s.ContainerId = id.ToString("D");
+                else if (v.Length > 0) s.Warnings.Add("ContainerId must be a containerId as Status.cmd lists it, like 6f1d2a3b-0000-1111-2222-333344445555; ignoring it.");
+            }
+
             v = ini.Get("ToggleHotkey"); if (v != null) s.ToggleHotkey = v;
             v = ini.Get("TakeHotkey"); if (v != null) s.TakeHotkey = v;
             v = ini.Get("GiveHotkey"); if (v != null) s.GiveHotkey = v;
@@ -177,7 +192,9 @@ namespace DualConnectTray
                 else s.Warnings.Add("NotifyOnOutsideChanges must be true or false; using true.");
             }
 
-            s.TimeoutSeconds = ReadInt(ini, "TimeoutSeconds", s.TimeoutSeconds, 3, 120, s.Warnings);
+            // DualConnect accepts 1 to 120; below 10 its 8-second watch after an interrupted switch
+            // would use up most of a step.
+            s.TimeoutSeconds = ReadInt(ini, "TimeoutSeconds", s.TimeoutSeconds, 10, 120, s.Warnings);
             s.SafetyPollSeconds = ReadInt(ini, "SafetyPollSeconds", s.SafetyPollSeconds, 0, 3600, s.Warnings);
             if (s.SafetyPollSeconds > 0 && s.SafetyPollSeconds < 10)
             {
@@ -464,9 +481,12 @@ namespace DualConnectTray
         public bool IsDefault;
         public double Peak = -1;
         public string Id = "";
+        public string ContainerId = "";   // the physical device; "" when DualConnect reports null
 
         public bool IsActive { get { return State == "active"; } }
         public bool IsRender { get { return Flow == "render"; } }
+        // "notpresent" endpoints belong to removed or older pairings; DualConnect never acts on them.
+        public bool IsPresent { get { return State == "active" || State == "unplugged"; } }
     }
 
     public sealed class DualConnectResult
@@ -534,7 +554,8 @@ namespace DualConnectTray
                         State = GetString(d, "state"),
                         IsDefault = GetBool(d, "isDefault", false),
                         Peak = GetNumber(d, "peak", -1),
-                        Id = GetString(d, "id")
+                        Id = GetString(d, "id"),
+                        ContainerId = GetString(d, "containerId")
                     });
                 }
             }
@@ -584,26 +605,116 @@ namespace DualConnectTray
         OnLaptopNotDefault,    // active, but Windows sends sound somewhere else by default
         NotOnLaptop,           // paired, endpoints present, none active
         NotPaired,             // DualConnect found no matching endpoint (exit code 2)
+        SeveralDevices,        // more than one paired device matches; DualConnect sends nothing (exit code 1)
         ToolMissing,           // DualConnect.exe could not be started
         CheckFailed            // anything else
     }
 
+    // What one DualConnect run came to, from its exit code and, where INTERFACE.md says
+    // "the message says which", from the message text.
+    public enum ResultKind
+    {
+        Done,                  // exit 0
+        Superseded,            // exit 4: stopped or replaced by a newer DualConnect command
+        StillRunning,          // exit 4: another DualConnect command still ran after 5 s; nothing was sent
+        NotConfirmed,          // exit 4: Windows didn't reach the expected state before --timeout
+        SeveralDevices,        // exit 1: the name matches more than one paired device; nothing was sent
+        BadArguments,          // exit 1, anything else
+        NotFound,              // exit 2
+        LockError,             // exit 3: the one-at-a-time lock couldn't be opened; nothing was sent
+        NoAnswer,              // exit 3: a Windows audio call did not return (DualConnect's watchdog)
+        Refused,               // exit 3, anything else
+        TrayStopped,           // the tray gave up waiting and ended the process
+        LaunchFailed,          // the file is missing or Windows wouldn't start it
+        Unreadable             // no JSON line, or an exit code outside 0-4
+    }
+
     public static class StateLogic
     {
+        // Phrases from DualConnect's messages (stage1-tools/DualConnect.cs). tests/CoreTests.cs
+        // checks that each one still appears in that file.
+        public const string PhraseSeveralDevices = "paired devices match the name";
+        public const string PhraseStopped = "stopped because a newer DualConnect command started";
+        public const string PhraseReplaced = "replaced by a newer DualConnect command";
+        public const string PhraseStillRunning = "is still running";   // both "still running" messages; neither sends anything
+        public const string PhraseLockError = "could not open the DualConnect lock";
+        public const string PhraseNoAnswer = "a Windows audio call did not return";
+        public const string PhraseNothingSent = "nothing was sent";
+
+        public static readonly string[] ContractPhrases =
+        {
+            PhraseSeveralDevices, PhraseStopped, PhraseReplaced, PhraseStillRunning, PhraseLockError, PhraseNoAnswer, PhraseNothingSent
+        };
+
+        public static ResultKind Classify(DualConnectResult r)
+        {
+            if (r.LaunchFailed) return ResultKind.LaunchFailed;
+            if (r.TimedOut) return ResultKind.TrayStopped;
+            if (!r.JsonParsed) return ResultKind.Unreadable;
+            string m = r.Message ?? "";
+            switch (r.ExitCode)
+            {
+                case 0: return ResultKind.Done;
+                case 1: return Has(m, PhraseSeveralDevices) ? ResultKind.SeveralDevices : ResultKind.BadArguments;
+                case 2: return ResultKind.NotFound;
+                case 3:
+                    if (Has(m, PhraseLockError)) return ResultKind.LockError;
+                    if (Has(m, PhraseNoAnswer)) return ResultKind.NoAnswer;
+                    return ResultKind.Refused;
+                case 4:
+                    if (Has(m, PhraseStopped) || Has(m, PhraseReplaced)) return ResultKind.Superseded;
+                    if (Has(m, PhraseStillRunning)) return ResultKind.StillRunning;
+                    return ResultKind.NotConfirmed;
+            }
+            return ResultKind.Unreadable;
+        }
+
+        private static bool Has(string text, string phrase)
+        {
+            return text != null && text.IndexOf(phrase, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         public static LaptopState FromStatus(DualConnectResult r)
         {
             if (r == null) return LaptopState.Unknown;
-            if (r.LaunchFailed) return LaptopState.ToolMissing;
-            if (r.TimedOut || !r.JsonParsed) return LaptopState.CheckFailed;
-            if (r.ExitCode == 2) return LaptopState.NotPaired;
-            if (r.ExitCode == 1 || r.ExitCode == 3) return LaptopState.CheckFailed;
-            return FromEndpoints(r.Endpoints);
+            switch (Classify(r))
+            {
+                case ResultKind.LaunchFailed: return LaptopState.ToolMissing;
+                case ResultKind.NotFound: return LaptopState.NotPaired;
+                case ResultKind.SeveralDevices: return LaptopState.SeveralDevices;
+                case ResultKind.Done:
+                    // status exits 0 only when it found at least one endpoint
+                    return r.Endpoints.Count > 0 ? FromEndpoints(r.Endpoints) : LaptopState.CheckFailed;
+                default: return LaptopState.CheckFailed;
+            }
         }
 
-        // Action results (take/give) also carry endpoints; this reads only those.
+        // A take or give result. Returns false when it says nothing about the AirPods: INTERFACE.md
+        // says an empty endpoint list means "not read" (watchdog, Windows error, lock error),
+        // not "no headset"; only exit code 2 means nothing matches.
+        public static bool TryStateAfterAction(DualConnectResult r, out LaptopState state)
+        {
+            state = LaptopState.Unknown;
+            if (r == null) return false;
+            switch (Classify(r))
+            {
+                case ResultKind.LaunchFailed: state = LaptopState.ToolMissing; return true;
+                case ResultKind.NotFound: state = LaptopState.NotPaired; return true;
+                case ResultKind.SeveralDevices: state = LaptopState.SeveralDevices; return true;
+                case ResultKind.TrayStopped:
+                case ResultKind.Unreadable:
+                case ResultKind.BadArguments:
+                    return false;
+            }
+            if (r.Endpoints.Count == 0) return false;
+            state = FromEndpoints(r.Endpoints);
+            return true;
+        }
+
+        // Reads only the endpoints; callers make sure the list was actually read.
         public static LaptopState FromEndpoints(List<EndpointInfo> endpoints)
         {
-            if (endpoints == null || endpoints.Count == 0) return LaptopState.NotPaired;
+            if (endpoints == null || endpoints.Count == 0) return LaptopState.Unknown;
             bool anyActive = false, activeDefault = false;
             foreach (EndpointInfo e in endpoints)
             {
@@ -621,10 +732,71 @@ namespace DualConnectTray
             return s == LaptopState.OnLaptop || s == LaptopState.OnLaptopNotDefault;
         }
 
+        // take and connect move the sound to the laptop; give and disconnect move it away.
+        public static bool MovesToLaptop(string verb)
+        {
+            return verb == "take" || verb == "connect";
+        }
+
         // The toggle: give back when Windows reports the link, otherwise take.
         public static string ToggleVerb(LaptopState s)
         {
             return IsOnLaptop(s) ? "give" : "take";
+        }
+
+        // While a switch runs, the toggle reverses it; DualConnect then stops the running one.
+        public static string ToggleVerb(LaptopState s, string runningVerb)
+        {
+            if (string.IsNullOrEmpty(runningVerb)) return ToggleVerb(s);
+            return MovesToLaptop(runningVerb) ? "give" : "take";
+        }
+
+        // Whether Windows may still finish the switch after DualConnect reported a failure
+        // (INTERFACE.md: "a request Windows already accepted can still complete after a timeout").
+        public static bool MayFinishLate(ResultKind kind, DualConnectResult r)
+        {
+            switch (kind)
+            {
+                case ResultKind.NotConfirmed:
+                case ResultKind.NoAnswer:
+                case ResultKind.Refused:
+                case ResultKind.TrayStopped:
+                case ResultKind.Unreadable:
+                    return !Has(r.Message, PhraseNothingSent);
+            }
+            return false;
+        }
+
+        // The notice after a switch that didn't work; null when none is needed.
+        public static string FailureText(ResultKind kind, DualConnectResult r, string deviceName)
+        {
+            switch (kind)
+            {
+                case ResultKind.Done:
+                case ResultKind.Superseded:
+                    return null;
+                case ResultKind.LaunchFailed:
+                    return "DualConnect could not be started. " + r.ErrorText + " Use \"Locate DualConnect.exe\" in the menu.";
+                case ResultKind.TrayStopped:
+                    return r.ErrorText + " Windows may still finish the switch; the icon will show it.";
+                case ResultKind.StillRunning:
+                    return "Another DualConnect switch was still running, so nothing was sent. Try again when it has finished.";
+                case ResultKind.NotConfirmed:
+                    return "Windows didn't confirm the change in time. The AirPods may be in the case, out of range or busy with the iPhone. Windows may still finish it; the icon will show it.";
+                case ResultKind.SeveralDevices:
+                    return "More than one paired device matches \"" + deviceName + "\", so nothing was sent. Set ContainerId in the settings to yours; Status.cmd and the log list each one.";
+                case ResultKind.BadArguments:
+                    return "DualConnect rejected the request: " + r.Message;
+                case ResultKind.NotFound:
+                    return "Windows has no audio device matching \"" + deviceName + "\". Check that the AirPods are paired with Windows and DeviceName is right.";
+                case ResultKind.LockError:
+                    return "DualConnect couldn't open its switch lock, so nothing was sent. A DualConnect started as administrator can cause this; close it and try again.";
+                case ResultKind.NoAnswer:
+                    return "A Windows audio call didn't answer, so DualConnect gave up. The switch may still finish; the icon will show it.";
+                case ResultKind.Refused:
+                    return "Windows refused the request. " + r.Message;
+            }
+            return r.ErrorText.Length > 0 ? r.ErrorText : ("DualConnect exit code " + r.ExitCode + ". " + r.Message);
         }
 
         public static string Describe(LaptopState s)
@@ -635,6 +807,7 @@ namespace DualConnectTray
                 case LaptopState.OnLaptopNotDefault: return "AirPods on laptop, not the default output";
                 case LaptopState.NotOnLaptop: return "AirPods not on this laptop";
                 case LaptopState.NotPaired: return "AirPods not paired with Windows";
+                case LaptopState.SeveralDevices: return "More than one paired device matches";
                 case LaptopState.ToolMissing: return "DualConnect.exe not found";
                 case LaptopState.CheckFailed: return "Last status check failed";
                 default: return "Checking AirPods...";
@@ -653,10 +826,12 @@ namespace DualConnectTray
             }
         }
 
-        // The first matching endpoint's device name, for the menu ("AirPods Pro").
+        // The device name for the menu ("AirPods Pro"), preferring endpoints of the current pairing.
         public static string DeviceLabel(List<EndpointInfo> endpoints)
         {
             if (endpoints == null) return "";
+            foreach (EndpointInfo e in endpoints)
+                if (e.IsRender && e.IsPresent && e.DeviceName.Length > 0) return e.DeviceName;
             foreach (EndpointInfo e in endpoints)
                 if (e.IsRender && e.DeviceName.Length > 0) return e.DeviceName;
             foreach (EndpointInfo e in endpoints)
@@ -679,15 +854,30 @@ namespace DualConnectTray
     public sealed class OutsideChangeDetector
     {
         private readonly TimeSpan grace;
+        private readonly TimeSpan lateWindow;
         private int actionsRunning;
         private DateTime lastActionEndUtc = DateTime.MinValue;
+        private string failedVerb;
+        private DateTime failedAtUtc;
 
-        public OutsideChangeDetector(TimeSpan grace)
+        public OutsideChangeDetector(TimeSpan grace) : this(grace, TimeSpan.Zero) { }
+
+        // grace: changes this soon after a switch are its own. lateWindow: after a switch that
+        // reported a failure, a change this soon counts as that switch finishing late.
+        public OutsideChangeDetector(TimeSpan grace, TimeSpan lateWindow)
         {
             this.grace = grace;
+            this.lateWindow = lateWindow;
         }
 
-        public void BeginAction() { actionsRunning++; }
+        // The failed switch the last "late-" answer belonged to.
+        public string LateVerb { get; private set; }
+
+        public void BeginAction()
+        {
+            actionsRunning++;
+            failedVerb = null;
+        }
 
         public void EndAction(DateTime nowUtc)
         {
@@ -695,19 +885,35 @@ namespace DualConnectTray
             lastActionEndUtc = nowUtc;
         }
 
+        // Call after the failed switch's own result has been applied.
+        public void NoteFailedSwitch(string verb, DateTime nowUtc)
+        {
+            failedVerb = verb;
+            failedAtUtc = nowUtc;
+        }
+
         public bool IsQuietPeriod(DateTime nowUtc)
         {
             return actionsRunning == 0 && nowUtc - lastActionEndUtc > grace;
         }
 
-        // Returns "left", "arrived" or null.
+        // Returns "left", "arrived", "late-left", "late-arrived" or null.
         public string Classify(LaptopState before, LaptopState after, DateTime nowUtc)
         {
-            if (!IsQuietPeriod(nowUtc)) return null;
+            if (actionsRunning > 0) return null;
             bool wasOn = StateLogic.IsOnLaptop(before), isOn = StateLogic.IsOnLaptop(after);
-            if (wasOn && after == LaptopState.NotOnLaptop) return "left";
-            if (before == LaptopState.NotOnLaptop && isOn) return "arrived";
-            return null;
+            string change = null;
+            if (wasOn && after == LaptopState.NotOnLaptop) change = "left";
+            else if (before == LaptopState.NotOnLaptop && isOn) change = "arrived";
+            if (change == null) return null;
+            if (failedVerb != null && nowUtc - failedAtUtc <= lateWindow)
+            {
+                LateVerb = failedVerb;
+                failedVerb = null;
+                return "late-" + change;
+            }
+            if (!IsQuietPeriod(nowUtc)) return null;
+            return change;
         }
     }
 
@@ -813,7 +1019,7 @@ namespace DualConnectTray
         {
             var takeMs = new List<long>();
             var giveMs = new List<long>();
-            int takeFailed = 0, giveFailed = 0, left = 0, arrived = 0, busy = 0, rowsRead = 0;
+            int takeFailed = 0, giveFailed = 0, left = 0, arrived = 0, busy = 0, stopped = 0, late = 0, rowsRead = 0;
             DateTime first = DateTime.MaxValue, last = DateTime.MinValue;
 
             foreach (string row in rows)
@@ -843,6 +1049,8 @@ namespace DualConnectTray
                 else if (evt == "outside-left") left++;
                 else if (evt == "outside-arrived") arrived++;
                 else if (evt == "busy") busy++;
+                else if (evt == "action-stopped") stopped++;
+                else if (evt == "late-left" || evt == "late-arrived") late++;
             }
 
             var sb = new StringBuilder();
@@ -859,6 +1067,8 @@ namespace DualConnectTray
             sb.AppendLine("AirPods left the laptop without you asking: " + left);
             sb.AppendLine("AirPods joined the laptop without you asking: " + arrived);
             if (busy > 0) sb.AppendLine("Key presses ignored while a switch was running: " + busy);
+            if (stopped > 0) sb.AppendLine("Switches stopped by a newer key press (not counted above): " + stopped);
+            if (late > 0) sb.AppendLine("Switches Windows finished shortly after they were reported as failed: " + late);
             sb.AppendLine();
             sb.Append("Times are measured by the tray from key press to DualConnect's answer.");
             return sb.ToString();
