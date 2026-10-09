@@ -21,10 +21,11 @@ Most of this project has never run on the real setup. Keep that visible:
 - Label anything that hasn't run on real hardware as untested, and name where it did run (a Linux container, a Windows VM, a real laptop).
 - In issues and pull requests, give your Windows edition and build, iOS version, AirPods model and firmware, and Bluetooth adapter.
 
-## Building and testing the tray app
+## Building and testing
 
-- **Windows:** double-click `stage3-app/build.cmd`. It uses the C# compiler that ships with Windows, so nothing needs installing.
-- **Linux:** run `stage3-app/tests/run-tests.sh` (needs `mono-devel` and `python3`; `dotnet-sdk-8.0` adds a Roslyn C# 5 check). These tests cover the logic that doesn't need Windows.
+- **Stage 1 tool, Windows:** double-click `stage1-tools/Build.cmd`. It builds `DualConnect.exe` and `DualConnectW.exe` with Windows' own C# compiler.
+- **Tray app, Windows:** double-click `stage3-app/build.cmd`. It uses the C# compiler that ships with Windows, so nothing needs installing.
+- **Tray app, Linux:** run `stage3-app/tests/run-tests.sh` (needs `mono-devel` and `python3`; `dotnet-sdk-8.0` adds a Roslyn C# 5 check). These tests cover the logic that doesn't need Windows.
 - Keep the source to C# 5 and .NET Framework 4.x, so it still builds with Windows' own compiler.
 
 ## Privacy in logs

@@ -3,3 +3,5 @@
 *.pdb
 stage3-app/DualConnectTray.ini
 actions.csv
+airpods-log-*.csv
+*.unsaved.csv
